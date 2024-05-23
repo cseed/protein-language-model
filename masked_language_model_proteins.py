@@ -27,6 +27,101 @@ import argparse
 import torch.optim.lr_scheduler as lr_scheduler
 from functools import partial
 import logging
+import json
+from datetime import datetime
+import subprocess
+import threading
+import xml.etree.ElementTree as ET
+from xmljson import badgerfish as bf
+
+class JsonLinesHandler(logging.FileHandler):
+    def __init__(self, filename, mode='a', encoding=None, delay=False):
+        super().__init__(filename, mode, encoding, delay)
+
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.stream.write(log_entry + "\n")
+        self.flush()
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'level': record.levelname,
+            'message': record.getMessage()
+        }
+        return json.dumps(log_record)
+
+# Configure the logger
+log_filename = 'transformer_run.jsonl'
+json_handler = JsonLinesHandler(log_filename, mode='w')
+json_formatter = JsonFormatter()
+json_handler.setFormatter(json_formatter)
+
+logging.root.setLevel(logging.DEBUG)
+logging.root.addHandler(json_handler)
+
+# Log nvidia-smi info on gpu and memory utilization
+def fetch_gpu_info():
+    try:
+        # Run the nvidia-smi command and get the output in XML format
+        result = subprocess.run(['nvidia-smi', '-q', '-x'], capture_output=True, text=True)
+        xml_output = result.stdout
+        # Parse the XML output
+        root = ET.fromstring(xml_output)
+        # Extract memory utilization and gpu utilization
+        gpu_utilizations = []
+        for gpu in root.findall('gpu'):
+            utilization = gpu.find('utilization')
+            memory_util = utilization.find('memory_util').text
+            gpu_util = utilization.find('gpu_util').text
+            gpu_utilizations.append({
+                'memory_utilization': memory_util,
+                'gpu_utilization': gpu_util
+            })
+        # Create the final JSON object
+        output = {
+            'type': 'nvidia-smi-output',
+            'gpu_utilizations': gpu_utilizations
+        }
+        # Log the JSON output
+        logging.info(f'Arguments: {output}')
+    except Exception as e:
+        logging.error(f"Failed to fetch GPU info: {e}")
+
+def monitor_gpu(interval=2):
+    while True:
+        fetch_gpu_info()
+        time.sleep(interval)
+
+
+# From ESM Github https://github.com/facebookresearch/esm/blob/main/esm/modules.py#L298
+def gelu(x):
+    """Implementation of the gelu activation function.
+
+    For information: OpenAI GPT's gelu is slightly different
+    (and gives slightly different results):
+    0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+    """
+    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+
+class LMHead(nn.Module):
+    """Head for masked language modeling. Adapted from ESM https://github.com/facebookresearch/esm/blob/main/esm/modules.py#L298"""
+
+    def __init__(self, embed_dim, output_dim):
+        super().__init__()
+        self.dense = nn.Linear(embed_dim, embed_dim)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, output_dim)
+
+
+    def forward(self, features):
+        x = self.dense(features)
+        y = gelu(x)
+        z = self.layer_norm(y)
+        xx = self.linear(z)
+        return xx
+
 
 class TransformerModel(nn.Module):
 
@@ -44,14 +139,17 @@ class TransformerModel(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         encoder_layers = TransformerEncoderLayer(embed_dim, nhead, d_hid, dropout, batch_first=True)
         self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
-        self.linear = nn.Linear(embed_dim, ntoken)
+        self.linear = LMHead(embed_dim, ntoken)
 
         self.init_weights()
 
     def init_weights(self) -> None:
-        self.embedding.weight.data.normal_(mean=0.0, std=0.02)
-        self.linear.bias.data.zero_()
-        self.linear.weight.data.normal_(mean=0.0, std=0.02)
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                if 'weight' in name:
+                    nn.init.normal_(param, mean=0.0, std=0.02)
+                elif 'bias' in name:
+                    nn.init.constant_(param, 0.0)
 
 
     def forward(self, src: Tensor, src_mask: Tensor = None) -> Tensor:
@@ -66,6 +164,7 @@ class TransformerModel(nn.Module):
         padding_mask = src == args.token_dic['<pad>']
         src = self.embedding(src) * math.sqrt(self.embed_dim) + self.pos_embedding(src)
         output = self.transformer_encoder(src, src_key_padding_mask=padding_mask)
+        output = self.norm(output)
         output = self.linear(output) #could try replacing this with inverse (i.e. transpose) of the embedding layer
         return output
 
@@ -117,7 +216,7 @@ def generate_data_mask(src_tensor, p=0.15):
     return true_indices
 
 
-def train_one_epoch(model: nn.Module, train_dataset, args) -> None:
+def train_one_epoch(model: nn.Module, train_dataset, epoch, args) -> None:
     model.train()  # turn on train mode
 
     train_loader = DataLoader(
@@ -137,15 +236,13 @@ def train_one_epoch(model: nn.Module, train_dataset, args) -> None:
     print(f'num training batches available: {len(train_loader)}')
     print(f'num batches we will run: {n_batches}')
 
-    xvals = []
-    yvals = []
     total_loss = 0.
     start_time = time.time()
     
     for batch in range(n_batches):
 
         data = next(train_data)
-        data_mask_indices = generate_data_mask(data, p=args.dropout)
+        data_mask_indices = generate_data_mask(data)
         masked_data = data.clone()
         masked_data[data_mask_indices[:,0], data_mask_indices[:,1]] = args.token_dic['<mask>']
         output = model(masked_data.to('cuda'))
@@ -153,24 +250,24 @@ def train_one_epoch(model: nn.Module, train_dataset, args) -> None:
         targets_at_mask_positions = data[data_mask_indices[:,0], data_mask_indices[:,1]].to(output_at_mask_positions.device)
         loss = args.loss_function(output_at_mask_positions, targets_at_mask_positions)
         total_loss += loss.item()
-
-        args.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
-        args.optimizer.step()
-
-        xvals.append(batch) # we should use weights and biases or tensorboard instead
-        yvals.append(float(loss))
         
-        if batch % args.log_interval == 0 and batch > 0:
-            per_batch_logging(batch, start_time, total_loss, n_batches, args)
+        if (batch % args.batches_per_update) == 0 :
+            args.optimizer.zero_grad()
+
+        loss.backward()
+        
+        if batch % args.log_interval == 0:
+            curr_batch_lr = args.scheduler.get_last_lr()[0]
+            per_batch_logging(batch, start_time, total_loss, n_batches, epoch, curr_batch_lr, args)
             total_loss = 0
             start_time = time.time()
-        args.scheduler.step()
 
-    return xvals, yvals
+        if (batch % args.batches_per_update) == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            args.optimizer.step()
+            args.scheduler.step()
 
-def evaluate(model: nn.Module, eval_dataset, args) -> float:
+def evaluate(model: nn.Module, eval_dataset, epoch, args) -> float:
     model.eval()  # turn on evaluation mode
     eval_loader = DataLoader(
         dataset=eval_dataset,
@@ -187,10 +284,12 @@ def evaluate(model: nn.Module, eval_dataset, args) -> float:
     
     total_loss = 0.
     total_seq_len = 0
+    start_time = time.time()
+
     with torch.no_grad():
         for i in range(n_batches):
             data = next(eval_data)
-            data_mask_indices = generate_data_mask(data, p=0.15)
+            data_mask_indices = generate_data_mask(data)
             masked_data = data.clone()
             masked_data[data_mask_indices[:,0], data_mask_indices[:,1]] = args.token_dic['<mask>']
             output = model(masked_data.to('cuda'))
@@ -201,14 +300,17 @@ def evaluate(model: nn.Module, eval_dataset, args) -> float:
             seq_len = targets_at_mask_positions.size(0)
             total_loss += seq_len * loss.item()
             total_seq_len += seq_len
+
+            if i % args.log_interval == 0 and i > 0:
+                per_batch_eval_logging(i, start_time, loss, n_batches, epoch, args)
+                start_time = time.time()
+
     total_avg_loss = total_loss / total_seq_len
     ppl = math.exp(total_avg_loss)
 
     return total_avg_loss, ppl
 
-def per_batch_logging(batch, start_time, total_loss, n_batches, args):
-
-    batch_lr = args.scheduler.get_last_lr()[0]
+def per_batch_logging(batch, start_time, total_loss, n_batches, epoch, batch_lr, args):
     ms_per_batch = (time.time() - start_time) * 1000 / args.log_interval
     cur_loss = total_loss / args.log_interval
     ppl = math.exp(cur_loss)
@@ -217,34 +319,31 @@ def per_batch_logging(batch, start_time, total_loss, n_batches, args):
             f'lr {batch_lr:.5g} | ms/batch {ms_per_batch:5.2f} | '
             f'loss {cur_loss:5.2f} | ppl {ppl:8.2f} | '
     )
-    logging.info(f'{batch:5d}/{n_batches:5d} batches | '
-            f'lr {batch_lr:.5g} | ms/batch {ms_per_batch:5.2f} | '
-            f'loss {cur_loss:5.2f} | ppl {ppl:8.2f} | ')
+    args = {'type': 'training-batch','batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time': ms_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
+    logging.info(f'Arguments: {args}')
 
-def per_epoch_logging(epoch, elapsed, val_loss, val_ppl, xvals, yvals, print_graph):
+def per_batch_eval_logging(batch, start_time, loss, n_batches, epoch, args):
+    ms_per_batch = (time.time() - start_time) * 1000 / args.log_interval
+    ppl = math.exp(loss)
+    args = {'type': 'eval-batch','batch_number': batch, 'total_batches': n_batches, 'batch_time': ms_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
+    logging.info(f'Arguments: {args}')
+
+def per_epoch_logging(epoch, elapsed, val_loss, val_ppl):
     print('-' * 89)
     print(f'| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | '
         f'valid loss {val_loss:5.2f} | valid ppl {val_ppl:8.2f}')
     print('-' * 89)
-
-    logging.info('-' * 89)
-    logging.info(f'| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | '
-        f'valid loss {val_loss:5.2f} | valid ppl {val_ppl:8.2f}')
-    logging.info('-' * 89)
-
-
-    if print_graph:
-        plt.scatter(xvals, yvals)
-        plt.title('Training Loss vs Batch')
-        plt.xlabel('Batch')
-        plt.ylabel('Training File')
-        plt.savefig(f'loss_graph{epoch}.png')
+    
+    args = {'type': 'end-of-epoch', 'epoch': epoch, 'total_time': elapsed, 'val_loss': val_loss, 'val_ppl': val_ppl}
+    logging.info(f'Arguments: {args}')
 
 def end_of_training_logging(test_loss, test_ppl):
     print('=' * 89)
     print(f'| End of training | test loss {test_loss:5.2f} | '
         f'test ppl {test_ppl:8.2f}')
     print('=' * 89)
+    args = {'type': 'end-of-training', 'test_loss': test_loss, 'test_ppl': test_ppl}
+    logging.info(f'Arguments: {args}')
 
 def full_training(model, train_dataset, validation_dataset, args):
     best_val_loss = float('inf')
@@ -254,11 +353,11 @@ def full_training(model, train_dataset, validation_dataset, args):
 
         for epoch in range(1, args.n_epochs + 1):
             epoch_start_time = time.time()
-            xvals, yvals = train_one_epoch(model, train_dataset, args)
+            train_one_epoch(model, train_dataset, epoch, args)
  
-            val_loss, val_ppl = evaluate(model, validation_dataset, args)
+            val_loss, val_ppl = evaluate(model, validation_dataset, epoch, args)
             elapsed = time.time() - epoch_start_time
-            per_epoch_logging(epoch, elapsed, val_loss, val_ppl, xvals, yvals, args.print_graph)
+            per_epoch_logging(epoch, elapsed, val_loss, val_ppl)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -289,13 +388,6 @@ def get_data():
 
     return train_dataset, validation_dataset, test_dataset, ntokens
 
-def get_simulated_data():
-    train_dataset = SimulatedDataSet1(transform=token_transform_sim)
-    validation_dataset = SimulatedDataSet1(transform=token_transform_sim)
-    test_dataset = SimulatedDataSet1(transform=token_transform_sim)
-    ntokens = len(args.token_dic)
-    return train_dataset, validation_dataset, test_dataset, ntokens
-
 def _get_inverse_sqrt_schedule_lr_lambda(current_step: int, *, num_warmup_steps: int, timescale: int = None):
     if current_step < num_warmup_steps:
         return float(current_step) / float(max(1, num_warmup_steps))
@@ -307,14 +399,16 @@ def main(args):
     # can also make the masking/corruption match esms
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(device)
-    logging.basicConfig(filename='transformer_run.log', filemode='w',format='%(message)s')
-    logging.root.setLevel(logging.DEBUG)
-    logging.info(args)
+    
+    # Log the training parameters
+    param_info = {'type': 'training-params'}
+    for key, value in vars(args).items():
+        param_info[key] = value
+    logging.info(f'Arguments: {param_info}')
 
-    if args.sim:
-        train_dataset, validation_dataset, test_dataset, n_tokens = get_simulated_data()
-    else: train_dataset, validation_dataset, test_dataset, n_tokens = get_data()
-
+    train_dataset, validation_dataset, test_dataset, n_tokens = get_data()
+    
+    # Train the model
     model = TransformerModel(
         n_tokens,
         args.max_length,
@@ -324,6 +418,17 @@ def main(args):
         args.n_layers,
         args.dropout
     ).to(dtype=torch.bfloat16,device=device)
+    
+    total_params = 0
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"Name: {name}, Shape: {param.shape}, Number of parameters: {param.numel()}")
+            total_params += param.numel()
+    print(f"Total number of parameters: {total_params}")
+
+    tokens_per_batch = args.batch_size * args.max_length
+    args.batches_per_update = args.tokens_per_update // tokens_per_batch
+    print(f'will update gradient every {args.batches_per_update} batches')
 
     if torch.cuda.device_count() > 1:
         print("Using", torch.cuda.device_count(), "GPUs!")
@@ -344,16 +449,16 @@ def main(args):
     # args.scheduler = torch.optim.lr_scheduler.StepLR(args.optimizer, 1.0, gamma=0.95) #to do
     model = full_training(model, train_dataset, validation_dataset, args)
     
-    test_loss, test_ppl = evaluate(model, test_dataset, args)
+    test_loss, test_ppl = evaluate(model, test_dataset, args.n_epochs, args)
     end_of_training_logging(test_loss, test_ppl)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Description of your script.")
     
-    parser.add_argument('--embed-dim', type=int, default=10)
-    parser.add_argument('--d-hid', type=int, default=40)
-    parser.add_argument('--n-head', type=int, default=2)
-    parser.add_argument('--n-layers', type=int, default=2)
+    parser.add_argument('--embed-dim', type=int, default=320)
+    parser.add_argument('--d-hid', type=int, default=1280)
+    parser.add_argument('--n-head', type=int, default=20)
+    parser.add_argument('--n-layers', type=int, default=6)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--n-train-batches', type=int, default=100)
@@ -361,20 +466,18 @@ if __name__ == '__main__':
     parser.add_argument('--n-epochs', type=int, default=3)
     parser.add_argument('--lr', type=float, default=4e-4)
     parser.add_argument('--log-interval', type=int, default=1)
-    parser.add_argument('--print-graph', action='store_true')
     parser.add_argument('--num-warmup-steps', type=int, default=40)
-    parser.add_argument('--sim', action='store_true')
+    parser.add_argument('--tokens-per-update', type=int, default = 2000000)
+    parser.add_argument('--max-length', type=int, default = 1024)
+
 
     args = parser.parse_args()
 
-    if args.sim:
-        args.token_dic = token_dic_sim
-        args.padded_collate = padded_collate_sim
-        args.max_length = 32
-    else:
-        args.token_dic = token_dic_uniref
-        args.padded_collate = padded_collate_uniref
-        args.max_length = 1024
+    args.token_dic = token_dic_uniref
+    args.padded_collate = padded_collate_uniref
+
+    monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
+    monitor_thread.start()
 
     main(args)
 
