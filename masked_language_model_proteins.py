@@ -323,7 +323,7 @@ def main(args):
         args.d_hid,
         args.n_layers,
         args.dropout
-    ).to(device)
+    ).to(dtype=torch.bfloat16,device=device)
 
     if torch.cuda.device_count() > 1:
         print("Using", torch.cuda.device_count(), "GPUs!")
