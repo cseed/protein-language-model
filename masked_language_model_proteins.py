@@ -222,11 +222,11 @@ class TransformerModel(nn.Module):
     def forward(self, src: Tensor, src_mask: Tensor = None) -> Tensor:
         """
         Arguments:
-            src: Tensor, shape ``[seq_len, batch_size]``
+            src: Tensor, shape ``[batch_size, seq_len]``
             src_mask: Tensor, shape ``[seq_len, seq_len]``
 
         Returns:
-            output Tensor of shape ``[seq_len, batch_size, ntoken]``
+            output Tensor of shape ``[batch_size, seq_len, ntoken]``
         """
         padding_mask = src == args.token_dic['<pad>']
         
@@ -351,6 +351,9 @@ def evaluate(model: nn.Module, eval_dataset, epoch, args) -> float:
         n_batches = len(eval_loader)
     else:
         n_batches = args.n_eval_batches
+
+    print(f'num eval batches available: {len(eval_loader)}')
+    print(f'num batches we will run: {n_batches}')
     
     total_loss = 0.
     total_seq_len = 0
