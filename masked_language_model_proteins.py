@@ -8,6 +8,12 @@ from torch import nn, Tensor
 from torch.nn import TransformerEncoder, TransformerEncoderLayer, functional
 from torch.utils.data import DataLoader, Subset
 
+from flash_attn.bert_padding import pad_input, unpad_input
+from flash_attn.modules.block import Block
+from flash_attn.modules.mha import MHA
+from flash_attn.modules.mlp import Mlp
+import torch.nn.functional as F
+
 from dataset_token import (
     Uniref50DatasetTokenized,
     SimulatedDataSet1,
@@ -122,6 +128,60 @@ class LMHead(nn.Module):
         xx = self.linear(z)
         return xx
 
+# Code taken from https://gist.github.com/kklemon/98e491ff877c497668c715541f1bf478
+class FlashAttentionTransformerEncoder(nn.Module):
+    def __init__(
+        self,
+        embed_dim,
+        nlayers,
+        nhead,
+        d_hid,
+        dropout,
+        norm_first=False,
+        activation=F.gelu
+    ):
+        super().__init__()
+
+        self._pad_input = pad_input
+        self._unpad_input = unpad_input
+        
+        
+        mixer_cls = partial(
+            MHA,
+            num_heads=nhead,
+            use_flash_attn=True,
+            rotary_emb_dim=0
+        )
+
+        mlp_cls = partial(Mlp, hidden_features=d_hid)
+     
+        self.layers = nn.ModuleList([
+            Block(
+                embed_dim,
+                mixer_cls=mixer_cls,
+                mlp_cls=mlp_cls,
+                resid_dropout1=dropout,
+                resid_dropout2=dropout,
+                prenorm=norm_first,
+            ) for _ in range(nlayers)
+        ])
+    
+    def forward(self, x, src_key_padding_mask):
+        batch, seqlen = x.shape[:2]
+
+        x, indices, cu_seqlens, max_seqlen_in_batch = self._unpad_input(x, ~src_key_padding_mask)
+        
+        for layer in self.layers:
+            x = layer(x, mixer_kwargs=dict(
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen_in_batch
+            ))
+
+        x = self._pad_input(x, indices, batch, seqlen)
+            
+        return x
+
+
 
 class TransformerModel(nn.Module):
 
@@ -131,14 +191,18 @@ class TransformerModel(nn.Module):
         self.model_type = 'Transformer'
         self.embed_dim = embed_dim
         self.embedding = nn.Embedding(ntoken, embed_dim, padding_idx = args.token_dic['<pad>'])
+        
         self.pos_embedding = LearnedPositionalEmbedding(
             num_embeddings=max_length,
             embedding_dim=embed_dim,
             padding_idx=args.token_dic['<pad>'],
         )
+        """
         self.norm = nn.LayerNorm(embed_dim)
         encoder_layers = TransformerEncoderLayer(embed_dim, nhead, d_hid, dropout, batch_first=True)
         self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
+        """
+        self.transformer_encoder = FlashAttentionTransformerEncoder(embed_dim, nlayers, nhead, d_hid, dropout)
         self.linear = LMHead(embed_dim, ntoken)
 
         self.init_weights()
@@ -162,10 +226,11 @@ class TransformerModel(nn.Module):
             output Tensor of shape ``[seq_len, batch_size, ntoken]``
         """
         padding_mask = src == args.token_dic['<pad>']
+        
         src = self.embedding(src) * math.sqrt(self.embed_dim) + self.pos_embedding(src)
+        
         output = self.transformer_encoder(src, src_key_padding_mask=padding_mask)
-        output = self.norm(output)
-        output = self.linear(output) #could try replacing this with inverse (i.e. transpose) of the embedding layer
+        output = self.linear(output)
         return output
 
 class LearnedPositionalEmbedding(nn.Embedding):
@@ -236,9 +301,11 @@ def train_one_epoch(model: nn.Module, train_dataset, epoch, args) -> None:
     print(f'num training batches available: {len(train_loader)}')
     print(f'num batches we will run: {n_batches}')
 
-    total_loss = 0.
     start_time = time.time()
     
+    # Zero grad at the start of each epoch
+    args.optimizer.zero_grad()
+
     for batch in range(n_batches):
 
         data = next(train_data)
@@ -249,23 +316,23 @@ def train_one_epoch(model: nn.Module, train_dataset, epoch, args) -> None:
         output_at_mask_positions = output[data_mask_indices[:,0], data_mask_indices[:,1]]
         targets_at_mask_positions = data[data_mask_indices[:,0], data_mask_indices[:,1]].to(output_at_mask_positions.device)
         loss = args.loss_function(output_at_mask_positions, targets_at_mask_positions)
-        total_loss += loss.item()
         
-        if (batch % args.batches_per_update) == 0 :
-            args.optimizer.zero_grad()
-
+        curr_batch_lr = args.scheduler.get_last_lr()[0]
+        curr_batch_loss = loss.item()
+        
+        # Scale loss for accumulation TODO: this is what online said is it right?
+        loss = loss / args.batches_per_update
         loss.backward()
-        
-        if batch % args.log_interval == 0:
-            curr_batch_lr = args.scheduler.get_last_lr()[0]
-            per_batch_logging(batch, start_time, total_loss, n_batches, epoch, curr_batch_lr, args)
-            total_loss = 0
-            start_time = time.time()
 
-        if (batch % args.batches_per_update) == 0:
+        if (batch + 1) % args.batches_per_update == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
             args.optimizer.step()
             args.scheduler.step()
+            args.optimizer.zero_grad()
+
+        if batch % args.log_interval == 0:
+            per_batch_logging(batch, start_time, curr_batch_loss, n_batches, epoch, curr_batch_lr, args)
+            start_time = time.time()
 
 def evaluate(model: nn.Module, eval_dataset, epoch, args) -> float:
     model.eval()  # turn on evaluation mode
@@ -427,7 +494,7 @@ def main(args):
     print(f"Total number of parameters: {total_params}")
 
     tokens_per_batch = args.batch_size * args.max_length
-    args.batches_per_update = args.tokens_per_update // tokens_per_batch
+    args.batches_per_update = max(args.tokens_per_update // tokens_per_batch, 1)
     print(f'will update gradient every {args.batches_per_update} batches')
 
     if torch.cuda.device_count() > 1:
