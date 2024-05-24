@@ -16,11 +16,7 @@ import torch.nn.functional as F
 
 from dataset_token import (
     Uniref50DatasetTokenized,
-    SimulatedDataSet1,
-    token_dic_sim,
     token_dic_uniref,
-    token_transform_sim,
-    padded_collate_sim,
     token_transform_uniref,
     padded_collate_uniref,
 )
@@ -76,13 +72,27 @@ def fetch_gpu_info():
             utilization = gpu.find('utilization')
             memory_util = utilization.find('memory_util').text
             gpu_util = utilization.find('gpu_util').text
+            # Extract fb_memory_usage fields
+            fb_memory_usage = gpu.find('fb_memory_usage')
+            total_memory = fb_memory_usage.find('total').text
+            reserved_memory = fb_memory_usage.find('reserved').text
+            used_memory = fb_memory_usage.find('used').text
+            free_memory = fb_memory_usage.find('free').text
+
             gpu_utilizations.append({
                 'memory_utilization': memory_util,
-                'gpu_utilization': gpu_util
+                'gpu_utilization': gpu_util,
+                'memory_usage': {
+                    'total': total_memory,
+                    'reserved': reserved_memory,
+                    'used': used_memory,
+                    'free': free_memory
+                }
             })
         # Create the final JSON object
         output = {
             'type': 'nvidia-smi-output',
+            'timestamp': time.time(),
             'gpu_utilizations': gpu_utilizations
         }
         # Log the JSON output
@@ -99,7 +109,7 @@ def monitor_cpu_load(interval=1):
     while True:
         with open('/proc/loadavg','r') as f:
             val = f.readlines()
-            log_info = {'type': 'cpu-load', 'cpu-usage': val}
+            log_info = {'type': 'cpu-load', 'timestamp': time.time(), 'cpu-usage': val}
             logging.info(log_info)
         f.close()
         time.sleep(interval)
@@ -291,7 +301,8 @@ def train_one_epoch(model: nn.Module, train_dataset, epoch, args) -> None:
         dataset=train_dataset,
         batch_size=args.batch_size,
         collate_fn=args.padded_collate,
-        shuffle=True
+        shuffle=True,
+        num_workers=4
     )
     train_data = iter(train_loader)
     
@@ -343,7 +354,8 @@ def evaluate(model: nn.Module, eval_dataset, epoch, args) -> float:
         dataset=eval_dataset,
         batch_size=args.batch_size,
         collate_fn=args.padded_collate,
-        shuffle=True
+        shuffle=True,
+        num_workers=4
     )
     eval_data = iter(eval_loader)
 
@@ -392,13 +404,13 @@ def per_batch_logging(batch, start_time, total_loss, n_batches, epoch, batch_lr,
             f'lr {batch_lr:.5g} | ms/batch {ms_per_batch:5.2f} | '
             f'loss {cur_loss:5.2f} | ppl {ppl:8.2f} | '
     )
-    log_args = {'type': 'training-batch','batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time': ms_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
+    log_args = {'type': 'training-batch','timestamp': time.time(), 'batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time_msec': ms_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
     logging.info(log_args)
 
 def per_batch_eval_logging(batch, start_time, loss, n_batches, epoch, args):
     ms_per_batch = (time.time() - start_time) * 1000 / args.log_interval
     ppl = math.exp(loss)
-    log_args = {'type': 'eval-batch','batch_number': batch, 'total_batches': n_batches, 'batch_time': ms_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
+    log_args = {'type': 'eval-batch','timestamp': time.time(), 'batch_number': batch, 'total_batches': n_batches, 'batch_time_msec': ms_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
     logging.info(log_args)
 
 def per_epoch_logging(epoch, elapsed, val_loss, val_ppl):
@@ -407,7 +419,7 @@ def per_epoch_logging(epoch, elapsed, val_loss, val_ppl):
         f'valid loss {val_loss:5.2f} | valid ppl {val_ppl:8.2f}')
     print('-' * 89)
     
-    log_args = {'type': 'end-of-epoch', 'epoch': epoch, 'total_time': elapsed, 'val_loss': val_loss, 'val_ppl': val_ppl}
+    log_args = {'type': 'end-of-epoch','timestamp': time.time(),'epoch': epoch, 'total_time_sec': elapsed, 'val_loss': val_loss, 'val_ppl': val_ppl}
     logging.info(log_args)
 
 def end_of_training_logging(test_loss, test_ppl):
@@ -415,7 +427,7 @@ def end_of_training_logging(test_loss, test_ppl):
     print(f'| End of training | test loss {test_loss:5.2f} | '
         f'test ppl {test_ppl:8.2f}')
     print('=' * 89)
-    log_args = {'type': 'end-of-training', 'test_loss': test_loss, 'test_ppl': test_ppl}
+    log_args = {'type': 'end-of-training', 'timestamp': time.time(),'test_loss': test_loss, 'test_ppl': test_ppl}
     logging.info(log_args)
 
 def full_training(model, train_dataset, validation_dataset, args):
@@ -477,6 +489,7 @@ def main(args):
     param_info = {'type': 'training-params'}
     for key, value in vars(args).items():
         param_info[key] = value
+    param_info['timestamp'] = time.time()
     logging.info(param_info)
 
     train_dataset, validation_dataset, test_dataset, n_tokens = get_data()
