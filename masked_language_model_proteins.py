@@ -51,12 +51,15 @@ class JsonLinesHandler(logging.FileHandler):
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
+        """
         log_record = {
             'timestamp': datetime.utcnow().isoformat(),
             'level': record.levelname,
             'message': record.getMessage()
         }
         return json.dumps(log_record)
+        """
+        return json.dumps(record.getMessage())
 
 # Configure the logger
 log_filename = 'transformer_run.jsonl'
@@ -91,7 +94,7 @@ def fetch_gpu_info():
             'gpu_utilizations': gpu_utilizations
         }
         # Log the JSON output
-        logging.info(f'Arguments: {output}')
+        logging.info(output)
     except Exception as e:
         logging.error(f"Failed to fetch GPU info: {e}")
 
@@ -386,14 +389,14 @@ def per_batch_logging(batch, start_time, total_loss, n_batches, epoch, batch_lr,
             f'lr {batch_lr:.5g} | ms/batch {ms_per_batch:5.2f} | '
             f'loss {cur_loss:5.2f} | ppl {ppl:8.2f} | '
     )
-    args = {'type': 'training-batch','batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time': ms_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
-    logging.info(f'Arguments: {args}')
+    log_args = {'type': 'training-batch','batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time': ms_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
+    logging.info(log_args)
 
 def per_batch_eval_logging(batch, start_time, loss, n_batches, epoch, args):
     ms_per_batch = (time.time() - start_time) * 1000 / args.log_interval
     ppl = math.exp(loss)
-    args = {'type': 'eval-batch','batch_number': batch, 'total_batches': n_batches, 'batch_time': ms_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
-    logging.info(f'Arguments: {args}')
+    log_args = {'type': 'eval-batch','batch_number': batch, 'total_batches': n_batches, 'batch_time': ms_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
+    logging.info(log_args)
 
 def per_epoch_logging(epoch, elapsed, val_loss, val_ppl):
     print('-' * 89)
@@ -401,16 +404,16 @@ def per_epoch_logging(epoch, elapsed, val_loss, val_ppl):
         f'valid loss {val_loss:5.2f} | valid ppl {val_ppl:8.2f}')
     print('-' * 89)
     
-    args = {'type': 'end-of-epoch', 'epoch': epoch, 'total_time': elapsed, 'val_loss': val_loss, 'val_ppl': val_ppl}
-    logging.info(f'Arguments: {args}')
+    log_args = {'type': 'end-of-epoch', 'epoch': epoch, 'total_time': elapsed, 'val_loss': val_loss, 'val_ppl': val_ppl}
+    logging.info(log_args)
 
 def end_of_training_logging(test_loss, test_ppl):
     print('=' * 89)
     print(f'| End of training | test loss {test_loss:5.2f} | '
         f'test ppl {test_ppl:8.2f}')
     print('=' * 89)
-    args = {'type': 'end-of-training', 'test_loss': test_loss, 'test_ppl': test_ppl}
-    logging.info(f'Arguments: {args}')
+    log_args = {'type': 'end-of-training', 'test_loss': test_loss, 'test_ppl': test_ppl}
+    logging.info(log_args)
 
 def full_training(model, train_dataset, validation_dataset, args):
     best_val_loss = float('inf')
@@ -471,7 +474,7 @@ def main(args):
     param_info = {'type': 'training-params'}
     for key, value in vars(args).items():
         param_info[key] = value
-    logging.info(f'Arguments: {param_info}')
+    logging.info(param_info)
 
     train_dataset, validation_dataset, test_dataset, n_tokens = get_data()
     
