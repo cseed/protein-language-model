@@ -47,26 +47,17 @@ class JsonLinesHandler(logging.FileHandler):
 
     def emit(self, record):
         log_entry = self.format(record)
-        self.stream.write(log_entry + "\n")
+        self.stream.write(f'{log_entry}\n')
         self.flush()
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
-        """
-        log_record = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'level': record.levelname,
-            'message': record.getMessage()
-        }
-        return json.dumps(log_record)
-        """
         return json.dumps(record.getMessage())
 
 # Configure the logger
 log_filename = 'transformer_run.jsonl'
 json_handler = JsonLinesHandler(log_filename, mode='w')
 json_formatter = JsonFormatter()
-json_handler.setFormatter(json_formatter)
 
 logging.root.setLevel(logging.DEBUG)
 logging.root.addHandler(json_handler)
@@ -99,11 +90,19 @@ def fetch_gpu_info():
     except Exception as e:
         logging.error(f"Failed to fetch GPU info: {e}")
 
-def monitor_gpu(interval=2):
+def monitor_gpu(interval=1):
     while True:
         fetch_gpu_info()
         time.sleep(interval)
 
+def monitor_cpu_load(interval=1):
+    while True:
+        with open('/proc/loadavg','r') as f:
+            val = f.readlines()
+            log_info = {'type': 'cpu-load', 'cpu-usage': val}
+            logging.info(log_info)
+        f.close()
+        time.sleep(interval)
 
 # From ESM Github https://github.com/facebookresearch/esm/blob/main/esm/modules.py#L298
 def gelu(x):
@@ -549,6 +548,9 @@ if __name__ == '__main__':
 
     monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
     monitor_thread.start()
+
+    moniter_thread2 = threading.Thread(target=monitor_cpu_load, daemon=True)
+    moniter_thread2.start()
 
     main(args)
 
