@@ -39,6 +39,7 @@ import subprocess
 import threading
 import xml.etree.ElementTree as ET
 from xmljson import badgerfish as bf
+import math
 
 class JsonLinesHandler(logging.FileHandler):
     def __init__(self, filename, mode='a', encoding=None, delay=False):
@@ -497,7 +498,7 @@ def main(args):
     print(f"Total number of parameters: {total_params}")
 
     tokens_per_batch = args.batch_size * args.max_length
-    args.batches_per_update = max(args.tokens_per_update // tokens_per_batch, 1)
+    args.batches_per_update = max(math.ceil(args.tokens_per_update / tokens_per_batch), 1)
     print(f'will update gradient every {args.batches_per_update} batches')
 
     if torch.cuda.device_count() > 1:
