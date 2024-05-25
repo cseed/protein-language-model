@@ -5,6 +5,13 @@ from google.cloud import storage
 import numpy as np
 import torch
 import time
+import logging
+
+# Suppress logs from Google Cloud Storage client
+logging.getLogger('google').setLevel(logging.WARNING)
+logging.getLogger('google.cloud').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('google.auth').setLevel(logging.WARNING)
 
 token_dic_uniref = {
     '<cls>': 0,

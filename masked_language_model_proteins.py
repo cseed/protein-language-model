@@ -66,12 +66,16 @@ def fetch_gpu_info():
         xml_output = result.stdout
         # Parse the XML output
         root = ET.fromstring(xml_output)
-        # Extract memory utilization and gpu utilization
+        attached_gpus = int(root.find('attached_gpus').text)
+
         gpu_utilizations = []
         for gpu in root.findall('gpu'):
+            product_name = gpu.find('product_name').text
+
             utilization = gpu.find('utilization')
             memory_util = utilization.find('memory_util').text
             gpu_util = utilization.find('gpu_util').text
+
             # Extract fb_memory_usage fields
             fb_memory_usage = gpu.find('fb_memory_usage')
             total_memory = fb_memory_usage.find('total').text
@@ -79,9 +83,13 @@ def fetch_gpu_info():
             used_memory = fb_memory_usage.find('used').text
             free_memory = fb_memory_usage.find('free').text
 
+            memory_util_float = float(memory_util.replace('%', '')) / 100.0
+            gpu_util_float = float(gpu_util.replace('%', '')) / 100.0
+
             gpu_utilizations.append({
-                'memory_utilization': memory_util,
-                'gpu_utilization': gpu_util,
+                'gpu_type': product_name,
+                'memory_utilization': memory_util_float,
+                'gpu_utilization': gpu_util_float,
                 'memory_usage': {
                     'total': total_memory,
                     'reserved': reserved_memory,
@@ -93,6 +101,7 @@ def fetch_gpu_info():
         output = {
             'type': 'nvidia-smi-output',
             'timestamp': time.time(),
+            'attached_gpus': attached_gpus,
             'gpu_utilizations': gpu_utilizations
         }
         # Log the JSON output
@@ -387,7 +396,7 @@ def evaluate(model: nn.Module, eval_dataset, epoch, args) -> float:
             total_seq_len += seq_len
 
             if i % args.log_interval == 0 and i > 0:
-                per_batch_eval_logging(i, start_time, loss, n_batches, epoch, args)
+                per_batch_eval_logging(i, start_time, loss.item(), n_batches, epoch, args)
                 start_time = time.time()
 
     total_avg_loss = total_loss / total_seq_len
@@ -396,21 +405,21 @@ def evaluate(model: nn.Module, eval_dataset, epoch, args) -> float:
     return total_avg_loss, ppl
 
 def per_batch_logging(batch, start_time, total_loss, n_batches, epoch, batch_lr, args):
-    ms_per_batch = (time.time() - start_time) * 1000 / args.log_interval
+    s_per_batch = (time.time() - start_time) / args.log_interval
     cur_loss = total_loss / args.log_interval
     ppl = math.exp(cur_loss)
 
     print(f'{batch:5d}/{n_batches:5d} batches | '
-            f'lr {batch_lr:.5g} | ms/batch {ms_per_batch:5.2f} | '
+            f'lr {batch_lr:.5g} | s/batch {s_per_batch:5.2f} | '
             f'loss {cur_loss:5.2f} | ppl {ppl:8.2f} | '
     )
-    log_args = {'type': 'training-batch','timestamp': time.time(), 'batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time_msec': ms_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
+    log_args = {'type': 'training-batch','timestamp': time.time(), 'batch_number': batch, 'total_batches': n_batches, 'learning_rate': batch_lr, 'batch_time_sec': s_per_batch, 'loss': cur_loss, 'ppl': ppl, 'epoch': epoch}
     logging.info(log_args)
 
 def per_batch_eval_logging(batch, start_time, loss, n_batches, epoch, args):
-    ms_per_batch = (time.time() - start_time) * 1000 / args.log_interval
+    s_per_batch = time.time() - start_time
     ppl = math.exp(loss)
-    log_args = {'type': 'eval-batch','timestamp': time.time(), 'batch_number': batch, 'total_batches': n_batches, 'batch_time_msec': ms_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
+    log_args = {'type': 'eval-batch','timestamp': time.time(), 'batch_number': batch, 'total_batches': n_batches, 'batch_time_sec': s_per_batch, 'loss': loss, 'ppl': ppl, 'epoch': epoch}
     logging.info(log_args)
 
 def per_epoch_logging(epoch, elapsed, val_loss, val_ppl):
@@ -488,7 +497,8 @@ def main(args):
     # Log the training parameters
     param_info = {'type': 'training-params'}
     for key, value in vars(args).items():
-        param_info[key] = value
+        if key != 'padded_collate':
+            param_info[key] = value
     param_info['timestamp'] = time.time()
     logging.info(param_info)
 
