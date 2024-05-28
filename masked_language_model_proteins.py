@@ -57,6 +57,7 @@ json_formatter = JsonFormatter()
 
 logging.root.setLevel(logging.DEBUG)
 logging.root.addHandler(json_handler)
+logging.root.setFormatter(json_formatter)
 
 # Log nvidia-smi info on gpu and memory utilization
 def fetch_gpu_info():
@@ -489,6 +490,16 @@ def _get_inverse_sqrt_schedule_lr_lambda(current_step: int, *, num_warmup_steps:
     decay = 1.0 / math.sqrt((current_step + shift) / timescale)
     return decay
 
+def _get_linear_decay_schedule_lr_lambda(current_step: int, *, num_warmup_steps: int, peak_lr: float, total_steps: int):
+    if current_step <= num_warmup_steps:
+        return float(current_step) / num_warmup_steps
+    else:
+        decay_start_step = num_warmup_steps
+        decay_steps = total_steps - num_warmup_steps
+        decay_rate = (1/10 - 1) / decay_steps
+        return 1 + decay_rate * (current_step - decay_start_step)
+
+
 def main(args):
     # can also make the masking/corruption match esms
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -533,10 +544,16 @@ def main(args):
     args.loss_function = nn.CrossEntropyLoss()
     num_warmup_steps = args.num_warmup_steps
     timescale = num_warmup_steps
+    # lr_lambda = partial(
+    #     _get_inverse_sqrt_schedule_lr_lambda,
+    #     num_warmup_steps=num_warmup_steps,
+    #     timescale=timescale
+    # )
     lr_lambda = partial(
-        _get_inverse_sqrt_schedule_lr_lambda,
+        _get_linear_decay_schedule_lr_lambda,
         num_warmup_steps=num_warmup_steps,
-        timescale=timescale
+        peak_lr = args.lr,
+        total_steps=500000
     )
     
     args.optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.98), lr=args.lr, weight_decay = 0.01)
