@@ -48,7 +48,7 @@ class JsonLinesHandler(logging.FileHandler):
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
-        return json.dumps(record.getMessage())
+        return json.dumps(eval(record.getMessage()))
 
 # Configure the logger
 log_filename = 'transformer_run.jsonl'
@@ -57,7 +57,7 @@ json_formatter = JsonFormatter()
 
 logging.root.setLevel(logging.DEBUG)
 logging.root.addHandler(json_handler)
-logging.root.setFormatter(json_formatter)
+json_handler.setFormatter(json_formatter)
 
 # Log nvidia-smi info on gpu and memory utilization
 def fetch_gpu_info():
@@ -553,7 +553,7 @@ def main(args):
         _get_linear_decay_schedule_lr_lambda,
         num_warmup_steps=num_warmup_steps,
         peak_lr = args.lr,
-        total_steps=500000
+        total_steps=270000
     )
     
     args.optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.98), lr=args.lr, weight_decay = 0.01)
