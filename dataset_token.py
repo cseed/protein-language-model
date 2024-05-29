@@ -1,5 +1,4 @@
 from torch.utils.data import Dataset, DataLoader
-import pyfastx
 import os
 from google.cloud import storage
 import numpy as np
