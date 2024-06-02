@@ -12,7 +12,7 @@ setup(
         'matplotlib',
         'packaging',
         'ninja',
-        'torchvision'
+        'torchvision',
         'flash-attn',
         'xmljson',
     ],
