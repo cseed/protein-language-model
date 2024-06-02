@@ -13,12 +13,7 @@ setup(
         'packaging',
         'ninja',
         'torchvision',
-        'flash-attn',
         'xmljson',
     ],
     python_requires='>=3.7',
-    setup_requires=[
-        'packaging',
-        'ninja'
-    ],
 )
