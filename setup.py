@@ -10,6 +10,9 @@ setup(
         'google-cloud-storage',
         'numpy',
         'matplotlib',
+        'packaging',
+        'ninja',
+        'torchvision'
         'flash-attn',
         'xmljson',
     ],
