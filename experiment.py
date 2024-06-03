@@ -37,6 +37,8 @@ import xml.etree.ElementTree as ET
 from xmljson import badgerfish as bf
 import math
 import yaml
+import pandas as pd
+from hail.utils import hadoop_copy
 
 class JsonLinesHandler(logging.FileHandler):
     def __init__(self, filename, mode='a', encoding=None, delay=False):
@@ -484,12 +486,6 @@ def get_data():
 
     return train_dataset, validation_dataset, test_dataset, ntokens
 
-def _get_inverse_sqrt_schedule_lr_lambda(current_step: int, *, num_warmup_steps: int, timescale: int = None):
-    if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))
-    shift = timescale - num_warmup_steps
-    decay = 1.0 / math.sqrt((current_step + shift) / timescale)
-    return decay
 
 def _get_linear_decay_schedule_lr_lambda(current_step: int, *, num_warmup_steps: int, peak_lr: float, total_steps: int):
     if current_step <= num_warmup_steps:
@@ -500,6 +496,124 @@ def _get_linear_decay_schedule_lr_lambda(current_step: int, *, num_warmup_steps:
         decay_rate = (1/10 - 1) / decay_steps
         return 1 + decay_rate * (current_step - decay_start_step)
 
+def make_loss_plot(events, run_id):
+    end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
+    df_epoch = pd.DataFrame(end_of_epoch_events)
+    validation_losses = df_epoch['val_loss'].values
+
+    training_events = [e for e in events if e['type'] == 'training-batch']
+    df_train = pd.DataFrame(training_events)
+    training_losses = df_train['loss'].values
+    
+    train_batches_per_epoch = len(df_train) // len(df_epoch)
+
+    epochs = [i*train_batches_per_epoch for i in range(1,len(validation_losses)+1)]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(np.arange(len(training_losses)), training_losses, label='Training Loss')
+    plt.plot(epochs, validation_losses, marker='o', linestyle='-', label='Validation Loss')
+
+    plt.xlabel('Training Steps')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+
+    plt.savefig('loss_plot.png')
+    hadoop_copy('loss_plot.png',f'gs://nnf-parsa/experiments/{run_id}/loss_plot.png')
+    
+def make_ppl_plot(events, run_id):
+    end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
+    df_epoch = pd.DataFrame(end_of_epoch_events)
+    validation_ppl = df_epoch['val_ppl'].values
+
+    training_events = [e for e in events if e['type'] == 'training-batch']
+    df_train = pd.DataFrame(training_events)
+    training_ppl = df_train['ppl'].values
+    
+    train_batches_per_epoch = len(df_train) // len(df_epoch)
+
+    epochs = [i*train_batches_per_epoch for i in range(1,len(validation_ppl)+1)]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(np.arange(len(training_ppl)), training_ppl, label='Training Perplexity')
+    plt.plot(epochs, validation_ppl, marker='o', linestyle='-', label='Validation Perplexity')
+
+    plt.xlabel('Training Steps')
+    plt.ylabel('Perplexity')
+    plt.title('Training and Validation Perplexity')
+    plt.legend()
+
+    plt.savefig('ppl_plot.png')
+    hadoop_copy('ppl_plot.png',f'gs://nnf-parsa/experiments/{run_id}/ppl_plot.png')
+
+def make_epoch_summary_table(events, run_id):
+    end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
+    df = pd.DataFrame(end_of_epoch_events)
+    df.to_csv('end_of_epoch_table.csv')
+    hadoop_copy('end_of_epoch_table.csv',f'gs://nnf-parsa/experiments/{run_id}/end_of_epoch_table.csv')
+    
+def make_lr_plot(events, run_id):
+    training_events = [e for e in events if e['type'] == 'training-batch']
+    df = pd.DataFrame(training_events)
+    plt.plot(np.arange(len(df)), df['learning_rate'], label='learning_rate')
+    plt.xlabel('batch')
+    plt.ylabel('learning_rate')
+    plt.savefit('lr_plot.png')
+    hadoop_copy('lr_plot.png',f'gs://nnf-parsa/experiments/{run_id}/lr_plot.png')
+
+def make_cpu_usage_plots(events, run_id):
+    cpu_events = [e for e in events if e['type'] == 'cpu-load']
+
+    cpu_events = [{**e, 'cpu-usage': float(e['cpu-usage'][0].split()[0])} for e in cpu_events]
+
+    df = pd.DataFrame(cpu_events)
+    df['timestamp'] = df['timestamp'] - df['timestamp'].min()
+    plt.plot(df['timestamp'], df['cpu-usage'], label='cpu-usage')
+    plt.xlabel('time (ms)')
+    plt.ylabel('cpu-usage')
+    plt.savefig('cpu_usage.png')
+    hadoop_copy('cpu_usage.png',f'gs://nnf-parsa/experiments/{run_id}/cpu_usage.png')
+
+def make_gpu_util_plots(events, run_id):
+    gpu_events = [e for e in events if e['type'] == 'nvidia-smi-output']
+
+    new_gpu_events = []
+    for e in gpu_events:
+        # copy e before modifying it
+        gpu_utilizations = e['gpu_utilizations']
+        e = dict(e)
+        del e['gpu_utilizations']
+
+        for i, util in enumerate(gpu_utilizations):
+            e[f'gpu{i}_memory_utilization'] = util['memory_utilization']
+            e[f'gpu{i}_utilization'] = util['gpu_utilization']
+            e[f'gpu{i}_total_memory'] = int(util['memory_usage']['total'][:-4])
+            e[f'gpu{i}_used_memory'] = int(util['memory_usage']['used'][:-4])
+
+        new_gpu_events.append(e)
+
+    gpu_events = new_gpu_events
+
+    df = pd.DataFrame(gpu_events)
+    df['timestamp'] = df['timestamp'] - df['timestamp'].min()
+
+    plt.plot(df['timestamp'], df['gpu0_memory_utilization'], label='memory utilization')
+    plt.plot(df['timestamp'], df['gpu0_utilization'], label='GPU utilization')
+    plt.ylim(bottom=0)
+    plt.xlabel('time (s)')
+    plt.ylabel('utilization')
+    plt.legend()
+    plt.savefig('gpu_util.png')
+    hadoop_copy('gpu_util.png',f'gs://nnf-parsa/experiments/{run_id}/gpu_util.png')
+    
+    plt.plot(df['timestamp'], df['gpu0_total_memory'], label='total')
+    plt.plot(df['timestamp'], df['gpu0_used_memory'], label='used')
+    plt.xlabel('time (s)')
+    plt.ylabel('memory (MiB)')
+    plt.ylim(0)
+    plt.legend()
+    plt.savefig('memory_util.png')
+    hadoop_copy('memory_util.png',f'gs://nnf-parsa/experiments/{run_id}/memory_util.png')
 
 def main(args):
     # can also make the masking/corruption match esms
@@ -562,6 +676,19 @@ def main(args):
     test_loss, test_ppl = evaluate(model, test_dataset, args.n_epochs, args)
     end_of_training_logging(test_loss, test_ppl)
 
+    events = []
+    run_id = args.run_id
+    with open('transformer_run.jsonl', 'r') as f:
+        for line in f:
+            events.append(json.loads(line))
+    make_loss_plot(events, run_id)
+    make_ppl_plot(events, run_id)
+    make_epoch_summary_table(events, run_id)
+    make_lr_plot(events, run_id)
+    make_cpu_usage_plots(events, run_id)
+    make_gpu_util_plots(events, run_id)
+
+
 class RunConfig():
     def __init__(self,config):
         self.embed_dim = config.get('embed-dim') if config.get('embed-dim') else 320
@@ -586,10 +713,17 @@ class RunConfig():
         
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Experiment script")
+    parser.add_argument('--run-id', type=str, help='The run ID for the experiment')
+    args = parser.parse_args()
+    run_id = args.run_id
+
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
     
     args = RunConfig(config)
+
+    args.run_id = run_id
 
     monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
     monitor_thread.start()
