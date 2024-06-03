@@ -685,6 +685,7 @@ def main(args):
     with open('transformer_run.jsonl', 'r') as f:
         for line in f:
             events.append(json.loads(line))
+    hadoop_copy('transformer_run.jsonl',f'gs://missense-scoring/experiments/{run_id}/transformer_run.jsonl')
     make_loss_plot(events, run_id)
     make_ppl_plot(events, run_id)
     make_epoch_summary_table(events, run_id)
