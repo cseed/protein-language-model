@@ -46,12 +46,16 @@ class JsonLinesHandler(logging.FileHandler):
 
     def emit(self, record):
         log_entry = self.format(record)
-        self.stream.write(f'{log_entry}\n')
-        self.flush()
+        if log_entry:
+            self.stream.write(f'{log_entry}\n')
+            self.flush()
 
 class JsonFormatter(logging.Formatter):
     def format(self, record):
-        return json.dumps(eval(record.getMessage()))
+        try:
+            return json.dumps(eval(record.getMessage()))
+        except Exception:
+            return None
 
 # Configure the logger
 log_filename = 'transformer_run.jsonl'
@@ -519,7 +523,7 @@ def make_loss_plot(events, run_id):
     plt.legend()
 
     plt.savefig('loss_plot.png')
-    hadoop_copy('loss_plot.png',f'gs://nnf-parsa/experiments/{run_id}/loss_plot.png')
+    hadoop_copy('loss_plot.png',f'gs://missense-scoring/experiments/{run_id}/loss_plot.png')
     
 def make_ppl_plot(events, run_id):
     end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
@@ -544,13 +548,13 @@ def make_ppl_plot(events, run_id):
     plt.legend()
 
     plt.savefig('ppl_plot.png')
-    hadoop_copy('ppl_plot.png',f'gs://nnf-parsa/experiments/{run_id}/ppl_plot.png')
+    hadoop_copy('ppl_plot.png',f'gs://missense-scoring/experiments/{run_id}/ppl_plot.png')
 
 def make_epoch_summary_table(events, run_id):
     end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
     df = pd.DataFrame(end_of_epoch_events)
     df.to_csv('end_of_epoch_table.csv')
-    hadoop_copy('end_of_epoch_table.csv',f'gs://nnf-parsa/experiments/{run_id}/end_of_epoch_table.csv')
+    hadoop_copy('end_of_epoch_table.csv',f'gs://missense-scoring/experiments/{run_id}/end_of_epoch_table.csv')
     
 def make_lr_plot(events, run_id):
     training_events = [e for e in events if e['type'] == 'training-batch']
@@ -559,7 +563,7 @@ def make_lr_plot(events, run_id):
     plt.xlabel('batch')
     plt.ylabel('learning_rate')
     plt.savefit('lr_plot.png')
-    hadoop_copy('lr_plot.png',f'gs://nnf-parsa/experiments/{run_id}/lr_plot.png')
+    hadoop_copy('lr_plot.png',f'gs://missense-scoring/experiments/{run_id}/lr_plot.png')
 
 def make_cpu_usage_plots(events, run_id):
     cpu_events = [e for e in events if e['type'] == 'cpu-load']
@@ -572,7 +576,7 @@ def make_cpu_usage_plots(events, run_id):
     plt.xlabel('time (ms)')
     plt.ylabel('cpu-usage')
     plt.savefig('cpu_usage.png')
-    hadoop_copy('cpu_usage.png',f'gs://nnf-parsa/experiments/{run_id}/cpu_usage.png')
+    hadoop_copy('cpu_usage.png',f'gs://missense-scoring/experiments/{run_id}/cpu_usage.png')
 
 def make_gpu_util_plots(events, run_id):
     gpu_events = [e for e in events if e['type'] == 'nvidia-smi-output']
@@ -604,7 +608,7 @@ def make_gpu_util_plots(events, run_id):
     plt.ylabel('utilization')
     plt.legend()
     plt.savefig('gpu_util.png')
-    hadoop_copy('gpu_util.png',f'gs://nnf-parsa/experiments/{run_id}/gpu_util.png')
+    hadoop_copy('gpu_util.png',f'gs://missense-scoring/experiments/{run_id}/gpu_util.png')
     
     plt.plot(df['timestamp'], df['gpu0_total_memory'], label='total')
     plt.plot(df['timestamp'], df['gpu0_used_memory'], label='used')
@@ -613,7 +617,7 @@ def make_gpu_util_plots(events, run_id):
     plt.ylim(0)
     plt.legend()
     plt.savefig('memory_util.png')
-    hadoop_copy('memory_util.png',f'gs://nnf-parsa/experiments/{run_id}/memory_util.png')
+    hadoop_copy('memory_util.png',f'gs://missense-scoring/experiments/{run_id}/memory_util.png')
 
 def main(args):
     # can also make the masking/corruption match esms
