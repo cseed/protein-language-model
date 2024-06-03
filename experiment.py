@@ -562,7 +562,7 @@ def make_lr_plot(events, run_id):
     plt.plot(np.arange(len(df)), df['learning_rate'], label='learning_rate')
     plt.xlabel('batch')
     plt.ylabel('learning_rate')
-    plt.savefit('lr_plot.png')
+    plt.savefig('lr_plot.png')
     hadoop_copy('lr_plot.png',f'gs://missense-scoring/experiments/{run_id}/lr_plot.png')
 
 def make_cpu_usage_plots(events, run_id):
