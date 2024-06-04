@@ -524,7 +524,6 @@ def make_loss_plot(events, run_id):
 
     plt.savefig('loss_plot.png')
     hadoop_copy('loss_plot.png',f'gs://missense-scoring/experiments/{run_id}/loss_plot.png')
-    plt.show()
     
 def make_ppl_plot(events, run_id):
     end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
@@ -550,7 +549,6 @@ def make_ppl_plot(events, run_id):
 
     plt.savefig('ppl_plot.png')
     hadoop_copy('ppl_plot.png',f'gs://missense-scoring/experiments/{run_id}/ppl_plot.png')
-    plt.show()
 
 def make_epoch_summary_table(events, run_id):
     end_of_epoch_events = [e for e in events if e['type'] == 'end-of-epoch']
@@ -561,12 +559,12 @@ def make_epoch_summary_table(events, run_id):
 def make_lr_plot(events, run_id):
     training_events = [e for e in events if e['type'] == 'training-batch']
     df = pd.DataFrame(training_events)
+    plt.figure(figsize=(10, 6))
     plt.plot(np.arange(len(df)), df['learning_rate'], label='learning_rate')
     plt.xlabel('batch')
     plt.ylabel('learning_rate')
     plt.savefig('lr_plot.png')
     hadoop_copy('lr_plot.png',f'gs://missense-scoring/experiments/{run_id}/lr_plot.png')
-    plt.show()
 
 def make_cpu_usage_plots(events, run_id):
     cpu_events = [e for e in events if e['type'] == 'cpu-load']
@@ -575,12 +573,12 @@ def make_cpu_usage_plots(events, run_id):
 
     df = pd.DataFrame(cpu_events)
     df['timestamp'] = df['timestamp'] - df['timestamp'].min()
+    plt.figure(figsize=(10, 6))
     plt.plot(df['timestamp'], df['cpu-usage'], label='cpu-usage')
     plt.xlabel('time (ms)')
     plt.ylabel('cpu-usage')
     plt.savefig('cpu_usage.png')
     hadoop_copy('cpu_usage.png',f'gs://missense-scoring/experiments/{run_id}/cpu_usage.png')
-    plt.show()
 
 def make_gpu_util_plots(events, run_id):
     gpu_events = [e for e in events if e['type'] == 'nvidia-smi-output']
@@ -605,6 +603,7 @@ def make_gpu_util_plots(events, run_id):
     df = pd.DataFrame(gpu_events)
     df['timestamp'] = df['timestamp'] - df['timestamp'].min()
 
+    plt.figure(figsize=(10, 6))
     plt.plot(df['timestamp'], df['gpu0_memory_utilization'], label='memory utilization')
     plt.plot(df['timestamp'], df['gpu0_utilization'], label='GPU utilization')
     plt.ylim(bottom=0)
@@ -613,8 +612,8 @@ def make_gpu_util_plots(events, run_id):
     plt.legend()
     plt.savefig('gpu_util.png')
     hadoop_copy('gpu_util.png',f'gs://missense-scoring/experiments/{run_id}/gpu_util.png')
-    plt.show()
     
+    plt.figure(figsize=(10, 6))
     plt.plot(df['timestamp'], df['gpu0_total_memory'], label='total')
     plt.plot(df['timestamp'], df['gpu0_used_memory'], label='used')
     plt.xlabel('time (s)')
@@ -623,7 +622,6 @@ def make_gpu_util_plots(events, run_id):
     plt.legend()
     plt.savefig('memory_util.png')
     hadoop_copy('memory_util.png',f'gs://missense-scoring/experiments/{run_id}/memory_util.png')
-    plt.show()
 
 def main(args):
     # can also make the masking/corruption match esms
